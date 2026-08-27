@@ -49,16 +49,20 @@ DETAILED_PAPERS_PER_MESSAGE = 1
 
 # 分类中文名，用于消息里展示
 CATEGORY_NAMES = {
+    "math.AP": "偏微分方程",
+    "math.AT": "代数拓扑",
+    "math.CV": "复变函数",
     "math.DG": "微分几何",
+    "math.FA": "泛函分析",
     "math.GN": "一般拓扑",
     "math.GT": "几何拓扑",
-    "math.GR": "群论",
+    "math.HO": "数学史与综述",
     "math.MG": "度量几何",
-    "math.NT": "数论",
+    "math.SG": "辛几何"
 }
 
 # 默认抓取的 arXiv 分类（按需增删）
-DEFAULT_CATEGORIES = ["math.DG", "math.GN", "math.GT", "math.GR", "math.MG", "math.NT"]
+DEFAULT_CATEGORIES = ["math.AP","math.DG","math.FA","math.GT","math.CV","math.MG"]
 
 # 已推送论文记录（防止窗口扩大后重复推送；由 workflow 提交回仓库保留）
 STATE_FILE = "last_pushed.json"
