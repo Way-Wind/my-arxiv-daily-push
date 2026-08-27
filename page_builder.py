@@ -17,12 +17,16 @@ import os
 
 # 与 main.py 保持一致
 CATEGORY_NAMES = {
+    "math.AP": "偏微分方程",
+    "math.AT": "代数拓扑",
+    "math.CV": "复变函数",
     "math.DG": "微分几何",
+    "math.FA": "泛函分析",
     "math.GN": "一般拓扑",
     "math.GT": "几何拓扑",
-    "math.GR": "群论",
+    "math.HO": "数学史与综述",
     "math.MG": "度量几何",
-    "math.NT": "数论",
+    "math.SG": "辛几何"
 }
 
 
