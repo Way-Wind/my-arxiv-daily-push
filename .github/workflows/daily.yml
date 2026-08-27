@@ -52,7 +52,7 @@ jobs:
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
           # GitHub Pages 推文页的根 URL（仓库名固定为 arxiv-daily-wechat）
           # 第一次部署后可以从 Actions 日志 / Pages 页面看到完整 URL
-          PAGE_BASE_URL: https://jiangzhexin.github.io/arxiv-daily-wechat
+          PAGE_BASE_URL: https://way-wind.github.io/my-arxiv-daily-push
         run: python main.py
 
       - name: 把生成的页面和推送记录提交回仓库（保留历史 + 去重状态）
@@ -64,7 +64,7 @@ jobs:
             echo "页面无变化，跳过提交"
           else
             git commit -m "chore: 更新每日 arXiv 速览页面 $(date -u +%Y-%m-%d)"
-            git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/JiangZhexin/arxiv-daily-wechat.git" HEAD:main
+            git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Way-Wind/my-arxiv-daily-push.git" HEAD:main
             echo "✅ 页面已提交回仓库"
           fi
 
