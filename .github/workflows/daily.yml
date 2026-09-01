@@ -1,87 +1,241 @@
 name: arxiv-daily-wechat
 
-# 触发方式：
-#   schedule  -> 每天两次自动运行（去重机制保证已推过的论文不会重复推送）：
-#                ① UTC 04:30 = 北京时间 12:30（主推送：arXiv RSS 此时已更新到当天凌晨发布的论文）
-#                ② UTC 12:30 = 北京时间 20:30（兜底：12:30 漏触发或 RSS 更新更晚时补推）
-#   workflow_dispatch -> 也可以在 Actions 页面手动点击「Run workflow」测试
+# ========================================================
+# 触发方式
+#
+# ① 北京时间 12:30
+#    UTC 04:30
+#
+# ② 北京时间 20:30
+#    UTC 12:30
+#
+# 两次运行依靠 last_pushed.json 去重，
+# 所以不会因为一天运行两次而重复推送同一篇论文。
+#
+# workflow_dispatch：
+# 可以在 GitHub Actions 页面手动运行一次。
+# ========================================================
+
 on:
   schedule:
     - cron: "30 4 * * *"
     - cron: "30 12 * * *"
+
   workflow_dispatch:
 
-# Pages 部署需要的权限
+
+# ========================================================
+# GitHub Actions 权限
+# ========================================================
+
 permissions:
-  contents: write   # 需要写权限：把每日生成的页面提交回仓库，保留历史
+  contents: write
   pages: write
   id-token: write
 
-# 同一时间只允许一个部署在跑
+
+# ========================================================
+# 防止两个 Pages 部署同时进行
+# ========================================================
+
 concurrency:
   group: pages
   cancel-in-progress: false
 
-jobs:
-  daily-digest:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+# ========================================================
+# 主任务
+# ========================================================
+
+jobs:
+
+  daily-digest:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # --------------------------------------------------
+      # 2. Python
+      # --------------------------------------------------
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+
         with:
           python-version: "3.12"
 
+
+      # --------------------------------------------------
+      # 3. 安装依赖
+      # --------------------------------------------------
+
       - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 抓取 arXiv + 生成推文页面 + 推送微信
-        env:
-          # ---------- Secrets（在仓库 Settings → Secrets and variables → Actions → Secrets 中配置）----------
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
-          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
-          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
-          WECHAT_TEMPLATE_ID: ${{ secrets.WECHAT_TEMPLATE_ID }}
-          WECHAT_OPENID: ${{ secrets.WECHAT_OPENID }}
-          # ---------- Variables ----------
-          ARXIV_CATEGORIES: ${{ vars.ARXIV_CATEGORIES }}
-          ARXIV_HOURS_BACK: ${{ vars.ARXIV_HOURS_BACK }}
-          ARXIV_MAX_PAPERS: ${{ vars.ARXIV_MAX_PAPERS }}   # 详细模式单次最多推送篇数，默认 200
-          WECHAT_MODE: ${{ vars.WECHAT_MODE }}
-          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
-          # GitHub Pages 推文页的根 URL（仓库名固定为 arxiv-daily-wechat）
-          # 第一次部署后可以从 Actions 日志 / Pages 页面看到完整 URL
-          PAGE_BASE_URL: https://way-wind.github.io/my-arxiv-daily-push
-        run: python main.py
-
-      - name: 把生成的页面和推送记录提交回仓库（保留历史 + 去重状态）
         run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+
+      # --------------------------------------------------
+      # 4. 运行主程序
+      #
+      # main.py 会：
+      #
+      # arXiv
+      #   ↓
+      # DeepSeek
+      #   ↓
+      # pages/daily-YYYY-MM-DD.html
+      #   ↓
+      # 微信
+      #
+      # PAGE_BASE_URL 必须和实际 GitHub Pages 地址一致。
+      # --------------------------------------------------
+
+      - name: 抓取 arXiv + AI 总结 + 生成 Pages + 推送微信
+
+        env:
+
+          # ================================
+          # Secrets
+          # ================================
+
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+
+          WECHAT_APP_ID: ${{ secrets.WECHAT_APP_ID }}
+
+          WECHAT_APP_SECRET: ${{ secrets.WECHAT_APP_SECRET }}
+
+          WECHAT_TEMPLATE_ID: ${{ secrets.WECHAT_TEMPLATE_ID }}
+
+          WECHAT_OPENID: ${{ secrets.WECHAT_OPENID }}
+
+
+          # ================================
+          # Variables
+          # ================================
+
+          ARXIV_CATEGORIES: ${{ vars.ARXIV_CATEGORIES }}
+
+          ARXIV_HOURS_BACK: ${{ vars.ARXIV_HOURS_BACK }}
+
+          ARXIV_MAX_PAPERS: ${{ vars.ARXIV_MAX_PAPERS }}
+
+          WECHAT_MODE: ${{ vars.WECHAT_MODE }}
+
+          DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL }}
+
+
+          # ================================
+          # GitHub Pages
+          # ================================
+
+          PAGE_BASE_URL: https://way-wind.github.io/my-arxiv-daily-push
+
+        run: |
+          python main.py
+
+
+      # --------------------------------------------------
+      # 5. 提交生成的网页 + 去重记录
+      #
+      # pages/
+      #     daily-YYYY-MM-DD.html
+      #     index.html
+      #
+      # last_pushed.json
+      #     防止论文重复推送
+      # --------------------------------------------------
+
+      - name: 提交每日页面和推送记录
+
+        run: |
+
           git config user.name "GitHub Actions"
+
           git config user.email "actions@users.noreply.github.com"
+
           git add -f pages/ last_pushed.json
+
           if git diff --cached --quiet; then
-            echo "页面无变化，跳过提交"
+
+            echo "页面和推送记录没有变化，跳过提交"
+
           else
-            git commit -m "chore: 更新每日 arXiv 速览页面 $(date -u +%Y-%m-%d)"
-            git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Way-Wind/my-arxiv-daily-push.git" HEAD:main
-            echo "✅ 页面已提交回仓库"
+
+            git commit \
+              -m "chore: 更新每日 arXiv 速览页面 $(date -u +%Y-%m-%d)"
+
+            git push
+
+            echo "✅ 页面和推送记录已提交回 main"
+
           fi
+
+
+      # --------------------------------------------------
+      # 6. 配置 GitHub Pages
+      # --------------------------------------------------
 
       - name: 配置 GitHub Pages
         uses: actions/configure-pages@v5
 
+
+      # --------------------------------------------------
+      # 7. 创建 Pages Artifact
+      # --------------------------------------------------
+
       - name: 上传 Pages 工件
+
         uses: actions/upload-pages-artifact@v3
+
         with:
           path: pages/
 
+
+      # --------------------------------------------------
+      # 8. 部署 GitHub Pages
+      # --------------------------------------------------
+
       - name: 部署到 GitHub Pages
+
         id: deployment
+
         uses: actions/deploy-pages@v4
 
+
+      # --------------------------------------------------
+      # 9. 完成信息
+      # --------------------------------------------------
+
       - name: 部署完成日志
+
         run: |
-          echo "✅ 推文页面已部署"
-          echo "📌 访问地址: ${{ steps.deployment.outputs.page_url }}"
-          echo "📌 今日页面: ${{ steps.deployment.outputs.page_url }}daily-$(date -u +%Y-%m-%d).html"
+
+          echo "=============================================="
+
+          echo "✅ GitHub Pages 部署完成"
+
+          echo "=============================================="
+
+          echo "Pages 地址："
+
+          echo "${{ steps.deployment.outputs.page_url }}"
+
+          echo ""
+
+          echo "本次页面："
+
+          echo "${{ steps.deployment.outputs.page_url }}daily-$(date -u +%Y-%m-%d).html"
+
+          echo "=============================================="
