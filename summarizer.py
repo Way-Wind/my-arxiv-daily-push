@@ -24,6 +24,10 @@ import time
 from typing import Dict, List, Optional
 
 import requests
+from security import FatalServiceError, model_endpoint, positive_limit, response_json
+from contextvars import ContextVar
+
+_budget = ContextVar("budget", default=None)
 
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
@@ -170,7 +174,7 @@ def _extract_json(content: str) -> dict:
     preview = content[:1000]
     raise DeepSeekError(
         "无法解析 DeepSeek 返回的 JSON。\n"
-        f"实际返回内容前 1000 字符：\n{preview}"
+        "响应正文已省略"
     )
 
 
@@ -189,7 +193,13 @@ def _call_chat(
     if not api_key:
         raise DeepSeekError("DEEPSEEK_API_KEY 为空")
 
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    url = model_endpoint(base_url)
+    budget = _budget.get()
+    if budget is not None:
+        if budget[0] <= 0 or time.monotonic() >= budget[1]:
+            raise FatalServiceError("模型调用预算已耗尽")
+        budget[0] -= 1
+        timeout = min(timeout, max(1, budget[1] - time.monotonic()))
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -216,7 +226,7 @@ def _call_chat(
         "max_tokens": 12000,
     }
 
-    print(f"      [DeepSeek] POST {url}")
+    print("      [DeepSeek] 正在请求获准的模型服务")
     print(f"      [DeepSeek] model={model}")
 
     try:
@@ -225,36 +235,22 @@ def _call_chat(
             headers=headers,
             json=payload,
             timeout=timeout,
+            stream=True,
+            allow_redirects=False,
         )
-    except requests.RequestException as exc:
-        raise DeepSeekError(
-            f"网络请求失败：{type(exc).__name__}: {exc}"
-        ) from exc
+    except requests.RequestException:
+        raise DeepSeekError("模型网络请求失败") from None
 
-    # HTTP 非 2xx
-    if not response.ok:
-        try:
-            error_body = response.json()
-            error_text = json.dumps(
-                error_body,
-                ensure_ascii=False,
-            )
-        except ValueError:
-            error_text = response.text[:3000]
-
-        raise DeepSeekError(
-            f"DeepSeek HTTP {response.status_code}\n"
-            f"响应内容：{error_text}"
-        )
-
-    # JSON response
+    if not 200 <= response.status_code < 300:
+        status = response.status_code
+        response.close()
+        if status in (401, 403) or 300 <= status < 400:
+            raise FatalServiceError(f"模型认证或重定向被拒绝 HTTP {status}")
+        raise DeepSeekError(f"模型 HTTP {status}")
     try:
-        data = response.json()
-    except ValueError as exc:
-        raise DeepSeekError(
-            "DeepSeek HTTP 请求成功，但响应不是合法 JSON。\n"
-            f"响应前 3000 字符：{response.text[:3000]}"
-        ) from exc
+        data = response_json(response, deadline=budget[1] if budget else time.monotonic() + timeout)
+    except requests.RequestException:
+        raise DeepSeekError("模型响应读取失败") from None
 
     # 检查 OpenAI-compatible response
     try:
@@ -267,8 +263,8 @@ def _call_chat(
     except (KeyError, IndexError, TypeError) as exc:
         raise DeepSeekError(
             "DeepSeek 返回结构异常。\n"
-            f"响应内容：{json.dumps(data, ensure_ascii=False)[:5000]}"
-        ) from exc
+            "响应正文已省略"
+        ) from None
 
     # 检查是否因为长度达到上限而截断
     finish_reason = choices[0].get("finish_reason")
@@ -304,7 +300,7 @@ def _validate_parsed(
     if not isinstance(papers_data, list):
         raise DeepSeekError(
             "DeepSeek 返回 JSON 中没有合法的 papers 数组。\n"
-            f"实际 JSON：{json.dumps(parsed, ensure_ascii=False)[:5000]}"
+            "响应正文已省略"
         )
 
     expected_set = set(expected_ids)
@@ -321,7 +317,7 @@ def _validate_parsed(
 
         if pid not in expected_set:
             print(
-                f"      [警告] DeepSeek 返回了本批不存在的论文 ID：{pid}"
+                "      [警告] 模型返回了本批不存在的论文 ID"
             )
             continue
 
@@ -428,6 +424,8 @@ def _call_with_retry(
 
             return results
 
+        except FatalServiceError:
+            raise
         except Exception as exc:
             last_error = exc
 
@@ -478,7 +476,11 @@ def summarize_papers(
     这样即使某一批因为 token、JSON 或特殊论文导致失败，
     也不会让整个 253 篇全部失败。
     """
+    _budget.set([positive_limit("AI_MAX_REQUESTS", 30, 1000),
+                 time.monotonic() + positive_limit("AI_MAX_SECONDS", 600, 3600)])
+    papers = papers[:positive_limit("AI_MAX_PAPERS", 200, 2000)]
     base_url = base_url or DEFAULT_BASE_URL
+    model_endpoint(base_url)
 
     if not papers:
         return {}
@@ -546,6 +548,8 @@ def summarize_papers(
                 )
                 failed_batches.extend(missing)
 
+        except FatalServiceError:
+            raise
         except Exception as exc:
             print(
                 f"      [批量失败] 批次 {batch_index}/{total_batches}："
@@ -601,6 +605,8 @@ def summarize_papers(
 
                 results.update(single_result)
 
+            except FatalServiceError:
+                raise
             except Exception as exc:
                 print(
                     f"      [最终失败] {pid}："
