@@ -145,7 +145,7 @@ pip install -r requirements.txt
 # 方式 A：复制配置模板并填写（config.json 已在 .gitignore 中，不会上传）
 cp config.example.json config.json
 python main.py --dry-run      # 先预览，不发微信
-python main.py                # 正式运行（本地跑需要配置环境变量/密钥）
+python main.py --prepare-only # 准备网页和待发清单，部署后再执行通知阶段
 
 # 方式 B：或直接用环境变量
 DEEPSEEK_API_KEY=sk-xxx WECHAT_APP_ID=wx... python main.py --dry-run
@@ -235,10 +235,10 @@ arXiv 周六、周日不发布新论文，属正常现象；周一早上也会�
 
 1. **网页和页面文件是公开的**：每天生成的论文推文页（`pages/daily-*.html`）会由工作流自动提交回仓库，同时部署为公开网页。**任何人都能 clone 仓库或直接访问网页**，看到这些页面。
 2. **公开的内容不含隐私**：页面内容 = arXiv 公开论文的标题 + AI 生成的总结与摘要 + arXiv 链接。这些都是全球公开的学术信息，**不包含你的任何个人信息**。
-3. **你的密钥绝对安全**：DeepSeek Key、微信测试号 appID/appsecret、openid 全部存放在 GitHub **Secrets** 中（不可见、不随仓库分发），`config.json` 也被 `.gitignore` 排除——**任何方式都不会泄露**。
+3. **凭据保护范围**：凭据通过 GitHub Secrets 注入运行进程；本地 config.json 为明文且默认忽略。Secrets 和 gitignore 不能保证防止错误代码、日志或强制提交造成泄露。
 4. **请勿提交真实密钥**：改代码时不要把真实密钥写进源码或配置文件再 push，一律放到 Secrets。
 5. **想彻底不公开怎么办**：
-   - 仓库改 **Private**：他人无法 clone，但注意**免费版 GitHub 的 Private 仓库 Pages 网页需要登录才能访问**，会导致微信里点开论文网页打不开（网页推文功能失效）。
+   - 私有仓库与 Pages 访问控制是不同设置。托管可用性和访问限制需按账户方案及 GitHub 官方文档核验，不应将仓库私有等同于网页必须登录。
    - 去掉工作流里"提交页面回仓库"的步骤（`daily.yml` 中 `git add -f pages/` 那一段）：仓库里不再保留历史页面文件，但 **Pages 网页本身依然公开**（这是 GitHub Pages 的性质），且会失去历史回看功能。
    - 如果你 fork 后想保留历史页面但不想公开源码：可改为仅 `pages/` 目录在公开仓库、代码在私有仓库（自行调整结构）。
 
@@ -261,3 +261,48 @@ arXiv 周六、周日不发布新论文，属正常现象；周一早上也会�
 ## License
 
 本项目使用 [MIT License](LICENSE) 开源，欢迎自由使用、修改和分发。
+
+## 安全运行与离线验证
+
+- `python main.py --offline-preview`：生成 `preview/` 示例网页，不读取真实凭据、不联网。
+- `--dry-run` 仍调用付费模型，只跳过微信；如仅需查看布局，请用离线预览。
+- `python -m unittest discover -s tests -v`：离线安全回归测试。
+- 提交前运行 `python check_secrets.py` 并审查暂存差异；CI 同样检查已跟踪文件。检测采用启发式规则，不覆盖全部秘密或 Git 历史。
+- 自定义模型服务必须使用 HTTPS，并将主机名明确加入 `DEEPSEEK_ALLOWED_HOSTS`（逗号分隔，不含协议或路径）。加入即表示信任该服务接收 API Key；重定向被拒绝。
+- `AI_MAX_PAPERS` 默认 200、最高 2000；两种模式均在总结前截断，剩余论文不标记成功。
+- `AI_MAX_REQUESTS` 默认 30、最高 1000；包括重试和单篇补救。
+- `AI_MAX_SECONDS` 默认 600、最高 3600；达到模型调用总时长预算后终止，单次 HTTP 仍受读取超时约束。认证 401/403 直接终止。
+- 响应体限额：模型和 RSS 为 2 MB，微信为 100 KB；令牌按服务返回有效期提前刷新，仅缓存在内存。
+- 微信错误日志省略敏感 URL 和响应正文。超时可能已送达但尚未确认，重跑仍可能重复，不能保证严格一次投递。
+- 如怀疑凭据泄露，先在服务平台撤销并生成新凭据，更新 Secrets；再检查日志和提交历史，按 GitHub 官方敏感数据清理指引处理历史。删除当前文件并不能撤销泄露的凭据。本项目不会自动轮换密钥或重写历史。
+
+工作流已拆分为生成、保存待发清单、部署、核对页面并通知、保存通知进度。
+
+## 分阶段交付与故障恢复
+
+现在 `python main.py` 和 `python main.py --prepare-only` 都只生成网页与 `pending.json`，不直接发送微信。原有本地正式运行示例应按本节分阶段操作；`--dry-run` 仍只预览、不进入待发清单。正式自动化由工作流完成：
+
+1. 只读生成任务仅获得模型密钥，生成 HTML、`page-data/` 和待发清单。
+2. 写入任务在部署前提交这些文件；提交失败便停止，不通知。
+3. 仅部署任务拥有 Pages 和 OIDC 写权限，使用 `github-pages` environment。
+4. 通知任务仅获得微信凭据，验证线上页面 SHA-256 与待发清单一致后，才发送微信。新页面暂未生效时会有限重试；仍不一致则停止。
+5. 每条已确认成功的消息立即更新本地状态。无论通知成功还是失败，均尝试上传 `delivery-checkpoint` 文件供只拥有内容写权限的任务保存回仓库。
+
+所有 checkout 禁止持久化凭据；Git 写入凭据只通过保存步骤的环境临时提供；不强制推送，不自动合并冲突。工作流默认只读，模型任务不持有微信秘密，通知任务不持有模型密钥。
+
+- 部署失败：待发清单已入库。可重跑失败任务，或重新触发工作流；已有未完成清单将优先恢复，不会重复调用模型。
+- 通知部分失败：已确认的部分保存在状态文件与清单中。先检查 `persist-checkpoint` 是否成功；成功后重新触发工作流，可恢复剩余部分。
+- `persist-checkpoint` 推送失败：先下载该运行的 `delivery-checkpoint`（保留 7 天），核对 `pending.json`、`last_pushed.json`、`pages/` 和 `page-data/`，与 main 上的改动合并后再提交。或在无并发变更时重跑失败的保存任务。不要直接重跑全部任务，避免使用旧状态重复发送。
+- 同一运行重跑通知任务时必须恢复该运行的 `delivery-checkpoint`。缺少文件时会保守停止；若原尝试尚未进入通知，可使用已入库清单重新触发新工作流。
+- 同日多次生成会按论文 ID 合并 `page-data/`，保留先前内容。升级前仅有 HTML、没有结构化数据的历史页面不会被逆向解析；当前仓库历史日期与新生成日期不同，历史文件仍保留。
+- 远端状态保存失败、运行被强制终止、发送后尚未来得及保存、响应超时等情况仍可能造成重复。微信与 Git 之间没有事务，不承诺严格一次发送。
+
+`pending.json` 仅保存公开论文关联的消息正文、论文 ID、页面 URL 和内容哈希，不包含接收者 openid、模板 ID 或应用密钥；`page-data/` 也是公开论文与模型总结。工作流文件仅保留七天，仓库状态才是长期恢复依据。
+
+本地分阶段运行时，先准备并部署 `pages/`，再设置微信环境变量与 `PAGE_BASE_URL`，执行 `python main.py --notify-pending`；它同样要求线上内容哈希核对通过。不要将此通知命令用于只想离线测试的场景。
+
+## 依赖与更新
+
+安装使用 `pip install --require-hashes --only-binary=:all: -r requirements.txt`。依赖及传递依赖均精确固定并记录 wheel 哈希，支持通用 Python wheel；不再每次升级 pip。当前目标为 Python 3.12，另已验证本地 Python 3.11。
+
+Actions 固定到从官方 actions 仓库核验的完整提交 SHA。Dependabot 每周提出 Actions 和 pip 更新；更新后必须核对来源、同步必要哈希，并重新执行安全和交付测试，不能直接去掉哈希验证。

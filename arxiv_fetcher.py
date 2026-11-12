@@ -16,6 +16,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import requests
+from security import bounded_body, paper_id, category
 
 ARXIV_RSS_URL = "https://arxiv.org/rss/{cat}"
 ARXIV_API_URL = "https://export.arxiv.org/api/query"
@@ -47,10 +48,16 @@ def _parse_rss_date(raw: str):
 
 def _fetch_rss(cat, headers, timeout=60):
     """抓取单个分类的 RSS，返回 (根元素, 文本)。"""
-    url = ARXIV_RSS_URL.format(cat=cat)
-    resp = requests.get(url, headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    return ET.fromstring(resp.text), resp.text
+    url = ARXIV_RSS_URL.format(cat=category(cat))
+    resp = requests.get(url, headers=headers, timeout=timeout, stream=True, allow_redirects=False)
+    try:
+        if not 200 <= resp.status_code < 300:
+            resp.close()
+            raise RuntimeError("arXiv HTTP 请求失败")
+        text = bounded_body(resp, deadline=time.monotonic() + timeout).decode("utf-8")
+        return ET.fromstring(text), text
+    except requests.RequestException:
+        raise RuntimeError("arXiv 网络请求失败") from None
 
 
 def fetch_new_papers(
@@ -109,6 +116,10 @@ def fetch_new_papers(
         for item in root.iter("item"):
             link = item.findtext("link", default="") or ""
             short_id = link.split("/abs/")[-1].strip()
+            try:
+                paper_id(short_id)
+            except ValueError:
+                continue
             if not short_id or short_id in seen_ids:
                 continue
 

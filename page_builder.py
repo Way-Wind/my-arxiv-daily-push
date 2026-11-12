@@ -13,6 +13,9 @@ page_builder.py
       👉 arXiv URL（可点击）
 """
 import os
+import re
+from html import escape
+from security import paper_id, category
 
 
 # 与 main.py 保持一致
@@ -80,7 +83,7 @@ footer { color: #aaa; font-size: 0.85em; text-align: center; margin-top: 40px; p
 
 
 def _escape(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return escape(str(text), quote=True)
 
 
 def build_daily_html(papers, summaries, categories, date_str, base_url="https://arxiv.org/abs/", history_links=None):
@@ -88,15 +91,24 @@ def build_daily_html(papers, summaries, categories, date_str, base_url="https://
 
     history_links: 可选，历史页面文件名列表，如 ["daily-2026-08-23.html", ...]，会在顶部显示历史入口。
     """
-    sections = {c: [] for c in categories}
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise ValueError("Invalid date")
+    if base_url != "https://arxiv.org/abs/":
+        raise ValueError("Untrusted paper URL base")
+    for h in history_links or []:
+        if not re.fullmatch(r"daily-\d{4}-\d{2}-\d{2}\.html", h):
+            raise ValueError("Invalid history filename")
+    sections = {category(c): [] for c in categories}
     for p in papers:
-        sec = _assign_section(p, categories)
+        paper_id(p["id"])
+        sec = category(_assign_section(p, categories))
         sections.setdefault(sec, []).append(p)
 
     active_sections = [(sec, sec_papers) for sec, sec_papers in sections.items() if sec_papers]
 
     out = []
     out.append('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">')
+    out.append('<meta http-equiv="Content-Security-Policy" content="default-src &apos;none&apos;; style-src &apos;unsafe-inline&apos;; base-uri &apos;none&apos;; form-action &apos;none&apos;">')
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     out.append(f"<title>arXiv 每日论文速览 · {date_str}</title>")
     out.append(f"<style>{_CSS}</style></head><body>")
@@ -114,13 +126,13 @@ def build_daily_html(papers, summaries, categories, date_str, base_url="https://
     if active_sections:
         toc = ['<nav class="toc">']
         for sec, sec_papers in active_sections:
-            label = _category_label(sec)
+            label = _escape(_category_label(sec))
             toc.append(f'<a href="#{sec}">{label}（{len(sec_papers)}）</a>')
         toc.append("</nav>")
         out.append("\n".join(toc))
 
     for sec, sec_papers in active_sections:
-        label = _category_label(sec)
+        label = _escape(_category_label(sec))
         out.append(f'<section id="{sec}">')
         out.append(f"<h2>📂 {label} · {len(sec_papers)} 篇</h2>")
         out.append("<ol>")
@@ -159,8 +171,23 @@ def write_daily_page(papers, summaries, categories, date_str, output_dir="pages"
     index.html 是所有日期论文速览的索引汇总页（点击日期进入当天详情）。
     返回: (daily_path, index_path)
     """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_str):
+        raise ValueError("Invalid date")
+    # Merge structured data so a second run on the same day preserves earlier papers.
+    import json
+    from pathlib import Path
+    from delivery import save
+    data_dir = Path(output_dir).parent / ('page-data' if output_dir == 'pages' else 'preview-data')
+    data_dir.mkdir(exist_ok=True)
+    data_path = data_dir / f'{date_str}.json'
+    previous = json.loads(data_path.read_text(encoding='utf-8')) if data_path.exists() else {'papers': [], 'summaries': {}, 'categories': []}
+    merged = {p['id']: p for p in previous['papers']}
+    merged.update({p['id']: p for p in papers})
+    papers = list(merged.values())
+    summaries = {**previous['summaries'], **summaries}
+    categories = list(dict.fromkeys(previous['categories'] + categories))
+    save(data_path, {'papers': papers, 'summaries': summaries, 'categories': categories})
     os.makedirs(output_dir, exist_ok=True)
-    import re
 
     # 扫描历史页面（不含今天）
     history = sorted(
@@ -186,7 +213,6 @@ def write_daily_page(papers, summaries, categories, date_str, output_dir="pages"
 
 def build_index_html(output_dir="pages"):
     """生成总目录索引页：列出 output_dir 里所有 daily-YYYY-MM-DD.html（新的在前），附当天论文篇数。"""
-    import re
 
     files = sorted(
         f for f in os.listdir(output_dir)
@@ -213,6 +239,7 @@ def build_index_html(output_dir="pages"):
 
     out = []
     out.append('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">')
+    out.append('<meta http-equiv="Content-Security-Policy" content="default-src &apos;none&apos;; style-src &apos;unsafe-inline&apos;; base-uri &apos;none&apos;; form-action &apos;none&apos;">')
     out.append('<meta name="viewport" content="width=device-width,initial-scale=1">')
     out.append("<title>arXiv 每日论文速览 · 总目录</title>")
     out.append(f"<style>{_CSS}</style></head><body>")

@@ -13,8 +13,10 @@ wechat_push.py
 通过 template_fields 映射后本模块会按你模板的实际字段名发送。
 """
 import time
+import math
 
 import requests
+from security import response_json
 
 TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token"
 SEND_URL = "https://api.weixin.qq.com/cgi-bin/message/template/send"
@@ -27,26 +29,35 @@ class WeChatPusher:
         self.template_id = template_id
         self.user_openid = user_openid
         self._token = None
+        self._expires_at = 0
+
+    def _request(self, method, url, **kwargs):
+        try:
+            resp = method(url, timeout=30, stream=True, allow_redirects=False, **kwargs)
+            if not 200 <= resp.status_code < 300:
+                status = resp.status_code
+                resp.close()
+                raise RuntimeError(f"微信 HTTP {status}")
+            return response_json(resp, 100_000, time.monotonic() + 30)
+        except requests.RequestException:
+            raise RuntimeError("微信网络请求失败，送达状态可能不确定") from None
 
     def get_access_token(self):
-        """获取（并缓存）全局 access_token，有效期 7200 秒。"""
-        if self._token:
+        if self._token and time.monotonic() < self._expires_at:
             return self._token
-        resp = requests.get(
-            TOKEN_URL,
-            params={
-                "grant_type": "client_credential",
-                "appid": self.app_id,
-                "secret": self.app_secret,
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if "access_token" not in data:
-            raise RuntimeError(f"获取 access_token 失败: {data}")
-        self._token = data["access_token"]
-        return self._token
+        self._token = None
+        self._expires_at = 0
+        data = self._request(requests.get, TOKEN_URL, params={
+            "grant_type": "client_credential", "appid": self.app_id, "secret": self.app_secret,
+        })
+        if not isinstance(data, dict):
+            raise RuntimeError("微信令牌响应无效")
+        token, lifetime = data.get("access_token"), data.get("expires_in")
+        if not isinstance(token, str) or not token or not isinstance(lifetime, (int, float)) or not math.isfinite(lifetime) or lifetime <= 0:
+            raise RuntimeError("微信令牌获取失败或有效期无效")
+        self._token = token
+        self._expires_at = time.monotonic() + max(0, lifetime - min(60, lifetime / 10))
+        return token
 
     def send_template(self, data, url=None, max_retries=2):
         """
@@ -68,22 +79,25 @@ class WeChatPusher:
             body["url"] = url
 
         for attempt in range(max_retries):
-            resp = requests.post(send_url, json=body, timeout=30)
-            resp.raise_for_status()
-            result = resp.json()
+            result = self._request(requests.post, send_url, json=body)
+            if not isinstance(result, dict):
+                raise RuntimeError("微信消息响应无效")
             if result.get("errcode") == 0:
                 return True
             if result.get("errcode") in (40001, 42001):
                 # access_token 过期或无效，清掉重取
                 self._token = None
+                self._expires_at = 0
+                if attempt + 1 >= max_retries:
+                    break
                 token = self.get_access_token()
                 send_url = f"{SEND_URL}?access_token={token}"
                 continue
-            raise RuntimeError(f"模板消息发送失败: {result}")
+            raise RuntimeError("模板消息被微信拒绝")
 
-        return False
+        raise RuntimeError("微信认证重试耗尽，消息未确认送达")
 
-    def send_batch(self, messages, pause_seconds=2):
+    def send_batch(self, messages, pause_seconds=2, on_success=None):
         """
         发送多条模板消息（论文多时拆分推送）。
 
@@ -93,7 +107,10 @@ class WeChatPusher:
         """
         sent = 0
         for i, msg in enumerate(messages):
-            self.send_template(msg["data"], url=msg.get("url"))
+            if self.send_template(msg["data"], url=msg.get("url")) is not True:
+                raise RuntimeError("微信消息未确认送达")
+            if on_success:
+                on_success(i)
             sent += 1
             if i < len(messages) - 1:
                 time.sleep(pause_seconds)

@@ -9,9 +9,9 @@ main.py —— arXiv 每日论文速览
         ↓
     DeepSeek 中文总结
         ↓
-    生成 GitHub Pages
+    生成 GitHub Pages 与待发清单
         ↓
-    微信模板消息
+    部署后 --notify-pending 核对页面并通知
 
 用法：
     本地预览：
@@ -20,7 +20,7 @@ main.py —— arXiv 每日论文速览
     本地测试少量论文：
         python main.py --dry-run --max-papers 3
 
-    正式运行：
+    准备正式交付（工作流负责部署后通知）：
         python main.py
 
 配置优先级：
@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 from arxiv_fetcher import fetch_new_papers
 from summarizer import summarize_papers
 from wechat_push import WeChatPusher
+from security import positive_limit, model_endpoint
 
 
 # ============================================================
@@ -111,7 +112,7 @@ def _save_pushed_ids(ids):
     保存已经推送过的论文 ID。
     """
     with open(
-        STATE_FILE,
+        STATE_FILE + ".tmp",
         "w",
         encoding="utf-8",
     ) as f:
@@ -123,6 +124,8 @@ def _save_pushed_ids(ids):
             ensure_ascii=False,
             indent=2,
         )
+
+    os.replace(STATE_FILE + ".tmp", STATE_FILE)
 
 
 def _utf8():
@@ -695,12 +698,39 @@ def main():
         ),
     )
 
+    parser.add_argument("--offline-preview", action="store_true", help="生成内置示例页面，不联网")
+    parser.add_argument('--prepare-only', action='store_true', help='仅准备持久化待发清单，不发送微信')
+    parser.add_argument('--notify-pending', action='store_true', help='验证部署页面并发送待发清单')
     args = parser.parse_args()
+    if args.offline_preview:
+        from page_builder import write_daily_page
+        sample = {"id": "2609.00001", "title": "离线示例", "summary": "示例摘要", "primary": "math.DG", "categories": ["math.DG"]}
+        write_daily_page([sample], {}, ["math.DG"], _today_str(), output_dir="preview")
+        print("离线示例已生成：preview/index.html")
+        return
 
     # ========================================================
     # 配置
     # ========================================================
 
+    args.prepare_only = not args.notify_pending and not args.dry_run
+    from pathlib import Path
+    from delivery import pending, notify, save, OUTBOX
+    if args.prepare_only:
+        Path('pages').mkdir(exist_ok=True)
+        Path('page-data').mkdir(exist_ok=True)
+        Path('page-data/README.txt').write_text('Structured public paper data for same-day merging.\n', encoding='utf-8')
+        if not OUTBOX.exists():
+            save(OUTBOX, {'schema': 1, 'entries': []})
+        if not Path(STATE_FILE).exists():
+            _save_pushed_ids(set())
+
+    if args.notify_pending:
+        notify(load_config()['wechat'], os.environ.get('PAGE_BASE_URL', ''))
+        return
+    if args.prepare_only and pending():
+        print('保留已有待发清单，先部署并恢复通知')
+        return
     cfg = load_config()
 
     arxiv_cfg = cfg["arxiv"]
@@ -720,10 +750,7 @@ def main():
 
         sys.exit(1)
 
-    print(
-        "[配置] DeepSeek Base URL："
-        f"{ds_cfg['base_url']}"
-    )
+    model_endpoint(ds_cfg["base_url"])
 
     print(
         "[配置] DeepSeek Model："
@@ -734,7 +761,7 @@ def main():
     # 检查微信
     # ========================================================
 
-    if not args.dry_run:
+    if not args.dry_run and not args.prepare_only:
 
         missing_wechat = []
 
@@ -849,7 +876,7 @@ def main():
             f"{len(new_papers)} 篇"
         )
 
-    papers = new_papers
+    papers = new_papers[:positive_limit("AI_MAX_PAPERS", 200, 2000)]
 
     # ========================================================
     # 3. DeepSeek 总结
@@ -1146,87 +1173,11 @@ def main():
     # 微信推送
     # ========================================================
 
-    try:
+    if args.prepare_only:
+        from delivery import prepare
+        prepare(messages, papers, mode, page_url)
+        return
 
-        pusher = WeChatPusher(
-            wx_cfg["app_id"],
-            wx_cfg["app_secret"],
-            wx_cfg["template_id"],
-            wx_cfg["user_openid"],
-        )
-
-        sent = pusher.send_batch(
-            messages
-        )
-
-    except Exception as exc:
-
-        print(
-            "\n================================================"
-        )
-
-        print(
-            "[致命错误] 微信推送失败"
-        )
-
-        print(
-            f"{type(exc).__name__}: {exc}"
-        )
-
-        print(
-            "================================================"
-        )
-
-        # 注意：
-        # 微信发送失败时不要记录 last_pushed.json，
-        # 否则下一次运行会被错误地认为已经推送。
-        sys.exit(1)
-
-    print(
-        f"\n[完成] 已发送 {sent} 条消息到微信。"
-    )
-
-    # ========================================================
-    # 记录已经推送的论文
-    # ========================================================
-
-    # detailed 模式如果只推送了一部分：
-    # 这里只记录实际发送的 papers。
-    #
-    # digest 模式：
-    # papers 是全部论文，所以全部记录。
-    newly_pushed_ids = {
-        p["id"]
-        for p in papers
-    }
-
-    updated_ids = (
-        pushed_ids
-        | newly_pushed_ids
-    )
-
-    try:
-
-        _save_pushed_ids(
-            updated_ids
-        )
-
-    except OSError as exc:
-
-        print(
-            f"[警告] last_pushed.json 保存失败："
-            f"{exc}"
-        )
-
-    print(
-        f"      [去重] 本次记录 "
-        f"{len(newly_pushed_ids)} 篇"
-    )
-
-    print(
-        f"      [去重] 累计 "
-        f"{len(updated_ids)} 篇"
-    )
 
 
 if __name__ == "__main__":

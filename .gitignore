@@ -11,3 +11,9 @@ venv/
 pages/
 # 已推送论文记录（本地不提交，由 workflow 用 git add -f 强制提交回仓库）
 last_pushed.json
+
+preview/
+last_pushed.json.tmp
+
+preview-data/
+pending.json.tmp
